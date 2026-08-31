@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Send to Xeneon</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin:0; min-height:100vh; background:#0b0b0d; color:#eee;
+    font:16px/1.5 -apple-system, "Segoe UI", sans-serif;
+    display:flex; flex-direction:column; align-items:center; justify-content:flex-start;
+    padding:32px 20px;
+  }
+  h1 { font-size:20px; margin:0 0 24px; }
+  textarea, input {
+    width:100%; max-width:480px; box-sizing:border-box; font-size:16px;
+    background:#1a1a1e; color:#eee; border:1px solid #333; border-radius:10px; padding:14px;
+  }
+  textarea { height:70px; resize:none; margin-bottom:14px; }
+  button {
+    width:100%; max-width:480px; padding:14px; font-size:16px; font-weight:600;
+    border:0; border-radius:10px; background:#e33; color:#fff; margin-top:6px; cursor:pointer;
+  }
+  button:disabled { opacity:0.5; }
+  #msg { max-width:480px; margin-top:16px; font-size:14px; color:#9a9; min-height:20px; }
+  #msg.err { color:#e77; }
+  details { max-width:480px; width:100%; margin-top:36px; color:#888; }
+  summary { cursor:pointer; }
+  .settings-field { margin-top:12px; }
+  .settings-field label { display:block; font-size:13px; margin-bottom:4px; color:#aaa; }
+</style>
+</head>
+<body>
+  <h1>📺 Send to Xeneon</h1>
+  <textarea id="link" placeholder="Paste a YouTube link…" autofocus></textarea>
+  <button id="send">Send to screen</button>
+  <div id="msg"></div>
+
+  <details>
+    <summary>Settings (one-time setup)</summary>
+    <div class="settings-field">
+      <label>Gist ID</label>
+      <input id="gistId" placeholder="e.g. 8f3a...">
+    </div>
+    <div class="settings-field">
+      <label>GitHub token (gists read/write)</label>
+      <input id="token" type="password" placeholder="ghp_… or fine-grained token">
+    </div>
+    <button id="save" style="background:#333; margin-top:14px;">Save settings</button>
+  </details>
+
+<script>
+const $ = id => document.getElementById(id);
+const FILE_NAME = 'current.json';
+
+function loadSettings() {
+  $('gistId').value = localStorage.getItem('xy_gist') || '';
+  $('token').value  = localStorage.getItem('xy_token') || '';
+}
+function saveSettings() {
+  localStorage.setItem('xy_gist', $('gistId').value.trim());
+  localStorage.setItem('xy_token', $('token').value.trim());
+  setMsg('Settings saved.', false);
+}
+loadSettings();
+$('save').addEventListener('click', saveSettings);
+
+function extractVideoId(input) {
+  input = input.trim();
+  if (/^[\w-]{11}$/.test(input)) return input; // bare ID
+  try {
+    const url = new URL(input);
+    if (url.hostname.includes('youtu.be')) return url.pathname.slice(1).split('/')[0];
+    if (url.pathname.startsWith('/shorts/')) return url.pathname.split('/')[2];
+    if (url.pathname.startsWith('/embed/')) return url.pathname.split('/')[2];
+    if (url.pathname.startsWith('/live/')) return url.pathname.split('/')[2];
+    const v = url.searchParams.get('v');
+    if (v) return v;
+  } catch (e) { /* not a URL */ }
+  return null;
+}
+
+function setMsg(text, isErr) {
+  const m = $('msg');
+  m.textContent = text;
+  m.className = isErr ? 'err' : '';
+}
+
+$('send').addEventListener('click', async () => {
+  const gistId = localStorage.getItem('xy_gist');
+  const token  = localStorage.getItem('xy_token');
+  if (!gistId || !token) {
+    setMsg('Set up Gist ID + token first (see Settings below).', true);
+    return;
+  }
+  const videoId = extractVideoId($('link').value);
+  if (!videoId) {
+    setMsg("Couldn't find a video ID in that link.", true);
+    return;
+  }
+  $('send').disabled = true;
+  setMsg('Sending…', false);
+  try {
+    const res = await fetch(`https://api.github.com/gists/${gistId}`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `token ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        files: {
+          [FILE_NAME]: {
+            content: JSON.stringify({ videoId, updatedAt: new Date().toISOString() })
+          }
+        }
+      })
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    setMsg(`Sent! (${videoId}) — should appear on screen within ~15s.`, false);
+    $('link').value = '';
+  } catch (err) {
+    setMsg('Failed to send: ' + err.message, true);
+  } finally {
+    $('send').disabled = false;
+  }
+});
+</script>
+</body>
+</html>
