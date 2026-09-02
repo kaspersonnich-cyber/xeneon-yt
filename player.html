@@ -5,29 +5,44 @@
 <title>Xeneon YouTube Player</title>
 <style>
   html, body { margin:0; padding:0; width:100%; height:100%; background:#000; overflow:hidden; }
-  #frame-wrap { position:fixed; inset:0; }
-  iframe { width:100%; height:100%; border:0; display:block; }
+  #frame-wrap { position:fixed; inset:0; overflow:hidden; }
+  #frame-wrap iframe { position:absolute; left:0; top:0; border:0; display:block; }
   #status {
     position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
     color:#888; font:600 20px/1.4 -apple-system, Segoe UI, sans-serif; text-align:center;
     background:#000; padding:0 24px;
   }
+  #unmute-btn {
+    position:absolute; bottom:16px; left:16px; z-index:10;
+    display:none; align-items:center; gap:8px;
+    background:rgba(0,0,0,0.65); color:#fff; border:1px solid rgba(255,255,255,0.4);
+    border-radius:999px; padding:10px 18px; font:600 16px/1 -apple-system, Segoe UI, sans-serif;
+    cursor:pointer;
+  }
+  #unmute-btn.visible { display:flex; }
 </style>
 </head>
 <body>
   <div id="status">Waiting for a video&hellip;</div>
-  <div id="frame-wrap"></div>
+  <div id="frame-wrap"><div id="yt-target"></div></div>
+  <button id="unmute-btn">🔇 Tap for sound</button>
 
+<script src="https://www.youtube.com/iframe_api"></script>
 <script>
 // ---- config comes from the URL you paste into iCUE, e.g.:
-// player.html?gist=YOUR_GIST_ID&token=YOUR_TOKEN&poll=15
+// player.html?gist=YOUR_GIST_ID&token=YOUR_TOKEN&poll=15&save=8
 const params = new URLSearchParams(location.search);
-const GIST_ID = params.get('gist');
-const TOKEN   = params.get('token') || '';
-const POLL_MS = (parseInt(params.get('poll'), 10) || 15) * 1000;
+const GIST_ID  = params.get('gist');
+const TOKEN    = params.get('token') || '';
+const POLL_MS  = (parseInt(params.get('poll'), 10) || 15) * 1000;
+const SAVE_MS  = (parseInt(params.get('save'), 10) || 8) * 1000;
 const FILE_NAME = 'current.json';
+const VIDEO_ASPECT = 16 / 9;
 
 let currentVideoId = null;
+let ytPlayer = null;
+let ytApiReady = false;
+let pendingVideo = null; // {id, start} queued if a poll arrives before the API script is ready
 
 function setStatus(msg) {
   const s = document.getElementById('status');
@@ -35,20 +50,91 @@ function setStatus(msg) {
   else { s.style.display = 'none'; }
 }
 
-function showVideo(videoId) {
-  if (videoId === currentVideoId) return;
-  currentVideoId = videoId;
-  const wrap = document.getElementById('frame-wrap');
-  wrap.innerHTML = '';
-  if (!videoId) { setStatus('Waiting for a video…'); return; }
-  setStatus(null);
-  const iframe = document.createElement('iframe');
-  iframe.src = `https://www.youtube.com/embed/${videoId}?autoplay=1&mute=1&controls=1&playsinline=1&rel=0`;
-  iframe.allow = 'autoplay; encrypted-media; picture-in-picture';
-  iframe.allowFullscreen = true;
-  wrap.appendChild(iframe);
+// Sizes the player iframe to the video's real aspect ratio (instead of
+// stretching to the full widget, which is what makes YouTube's own player
+// letterbox/pillarbox with centered black bars). Anchored to the left edge
+// so any leftover space collects on the right, not split both sides.
+function layoutIframe() {
+  if (!ytPlayer || typeof ytPlayer.getIframe !== 'function') return;
+  const iframe = ytPlayer.getIframe();
+  if (!iframe) return;
+  const w = window.innerWidth, h = window.innerHeight;
+  let videoW, videoH, top;
+  if (w / h > VIDEO_ASPECT) {
+    videoH = h; videoW = h * VIDEO_ASPECT; top = 0;
+  } else {
+    videoW = w; videoH = w / VIDEO_ASPECT; top = (h - videoH) / 2;
+  }
+  iframe.style.width = videoW + 'px';
+  iframe.style.height = videoH + 'px';
+  iframe.style.left = '0px';
+  iframe.style.top = top + 'px';
+}
+window.addEventListener('resize', layoutIframe);
+
+function showUnmuteBtn(show) {
+  document.getElementById('unmute-btn').classList.toggle('visible', !!show);
 }
 
+function createPlayer(videoId, startSeconds) {
+  ytPlayer = new YT.Player('yt-target', {
+    videoId: videoId,
+    playerVars: {
+      autoplay: 1, mute: 1, controls: 1, playsinline: 1, rel: 0,
+      start: startSeconds || 0, origin: location.origin
+    },
+    events: {
+      onReady: (e) => {
+        e.target.mute();
+        e.target.playVideo();
+        layoutIframe();
+        showUnmuteBtn(true);
+      }
+    }
+  });
+}
+
+function showVideo(videoId, startSeconds) {
+  if (videoId === currentVideoId) return;
+  currentVideoId = videoId;
+
+  if (!videoId) {
+    setStatus('Waiting for a video…');
+    showUnmuteBtn(false);
+    if (ytPlayer && typeof ytPlayer.stopVideo === 'function') ytPlayer.stopVideo();
+    return;
+  }
+  setStatus(null);
+
+  if (!ytApiReady) { pendingVideo = { id: videoId, start: startSeconds || 0 }; return; }
+
+  if (ytPlayer) {
+    ytPlayer.mute();
+    ytPlayer.loadVideoById({ videoId: videoId, startSeconds: startSeconds || 0 });
+    layoutIframe();
+    showUnmuteBtn(true);
+  } else {
+    createPlayer(videoId, startSeconds || 0);
+  }
+}
+
+// Called by the YouTube API script once it's loaded.
+window.onYouTubeIframeAPIReady = function () {
+  ytApiReady = true;
+  if (pendingVideo) {
+    createPlayer(pendingVideo.id, pendingVideo.start);
+    pendingVideo = null;
+  }
+};
+
+document.getElementById('unmute-btn').addEventListener('click', () => {
+  if (!ytPlayer) return;
+  ytPlayer.unMute();
+  ytPlayer.playVideo();
+  showUnmuteBtn(false);
+});
+
+// ---- reading from the gist (picks up new videos sent from remote.html) ----
 async function poll() {
   if (!GIST_ID) { setStatus('No gist configured. Add ?gist=YOUR_GIST_ID to the widget URL.'); return; }
   try {
@@ -59,15 +145,37 @@ async function poll() {
     const file = data.files && data.files[FILE_NAME];
     if (!file) throw new Error('current.json not found in gist');
     const parsed = JSON.parse(file.content);
-    showVideo(parsed.videoId || null);
+    showVideo(parsed.videoId || null, parsed.elapsed || 0);
   } catch (err) {
     console.error('poll failed', err);
     if (!currentVideoId) setStatus('Could not reach the gist. Check the token/gist ID.');
   }
 }
 
+// ---- writing back to the gist (saves playback position so a reload can resume) ----
+async function saveElapsed() {
+  if (!ytPlayer || !currentVideoId || !TOKEN) return;
+  if (typeof ytPlayer.getPlayerState !== 'function') return;
+  if (ytPlayer.getPlayerState() !== 1 /* YT.PlayerState.PLAYING */) return;
+  const elapsed = Math.floor(ytPlayer.getCurrentTime() || 0);
+  try {
+    await fetch(`https://api.github.com/gists/${GIST_ID}`, {
+      method: 'PATCH',
+      headers: { Authorization: `token ${TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        files: { [FILE_NAME]: { content: JSON.stringify({
+          videoId: currentVideoId, elapsed, updatedAt: new Date().toISOString()
+        }) } }
+      })
+    });
+  } catch (err) {
+    console.error('saveElapsed failed', err);
+  }
+}
+
 poll();
 setInterval(poll, POLL_MS);
+setInterval(saveElapsed, SAVE_MS);
 </script>
 </body>
 </html>
