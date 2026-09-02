@@ -112,7 +112,7 @@ $('send').addEventListener('click', async () => {
       body: JSON.stringify({
         files: {
           [FILE_NAME]: {
-            content: JSON.stringify({ videoId, updatedAt: new Date().toISOString() })
+            content: JSON.stringify({ videoId, elapsed: 0, updatedAt: new Date().toISOString() })
           }
         }
       })
